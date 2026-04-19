@@ -277,6 +277,7 @@ class AceStepLLMLoader:
     CATEGORY = "AceStep/Loaders"
 
     def load_llm(self, model_name, backend, quantization):
+        import folder_paths
         if LLM_KEY in folder_paths.folder_names_and_paths:
             model_path = folder_paths.get_full_path(LLM_KEY, model_name)
         else:
@@ -288,7 +289,34 @@ class AceStepLLMLoader:
         try:
             from acestep.llm_inference import LLMHandler
         except ImportError:
-            raise ImportError("AceStep library is not installed or accessible in ComfyUI's python environment.")
+            # Fallback: The user has the AceStep custom node pack installed, but its directory
+            # might not be in the Python path natively (common if it's named something like `ComfyUI-AceStep`).
+            # We search the custom_nodes directory to dynamically find and inject its path.
+            import sys
+            import folder_paths
+
+            acestep_found = False
+            custom_nodes_dir = os.path.join(folder_paths.base_path, "custom_nodes")
+
+            if os.path.exists(custom_nodes_dir):
+                for item in os.listdir(custom_nodes_dir):
+                    item_path = os.path.join(custom_nodes_dir, item)
+                    if os.path.isdir(item_path):
+                        # Look for the 'acestep' python package inside this custom node
+                        acestep_pkg_path = os.path.join(item_path, "acestep")
+                        if os.path.exists(acestep_pkg_path) and os.path.exists(os.path.join(acestep_pkg_path, "llm_inference.py")):
+                            if item_path not in sys.path:
+                                sys.path.insert(0, item_path)
+                            acestep_found = True
+                            break
+
+            if acestep_found:
+                try:
+                    from acestep.llm_inference import LLMHandler
+                except ImportError as e:
+                    raise ImportError(f"Found AceStep folder but failed to import LLMHandler: {e}")
+            else:
+                raise ImportError("AceStep library is not installed or accessible in ComfyUI's python environment. Could not find 'acestep' module in any custom_nodes directory.")
 
         handler = LLMHandler(
             persistent_storage_path=None
