@@ -63,10 +63,15 @@ class AceStepAudioToCodes_Custom:
         # 3. VAE Encoding
         print("[AceStepAudioToCodes] Starting VAE Encoding...")
         with torch.inference_mode():
-            # Add batch dimension for VAE
-            audio_batch = waveform.unsqueeze(0)
+            # Add batch dimension for VAE and move it to the same device as the VAE
+            audio_batch = waveform.unsqueeze(0).to(device, dtype=dtype)
+
+            print(f"[AceStepAudioToCodes] Calling VAE encode on device: {device}...")
             if hasattr(vae_model, 'tiled_encode'):
-                latents = vae_model.tiled_encode(audio_batch, offload_latent_to_cpu=False)
+                try:
+                    latents = vae_model.tiled_encode(audio_batch, offload_latent_to_cpu=False)
+                except TypeError:
+                    latents = vae_model.tiled_encode(audio_batch)
             else:
                 latents = vae_model.encode(audio_batch).latent_dist.sample()
 
@@ -200,8 +205,11 @@ class AceStepUnderstandMusic_Custom:
         # 2. Tokenize prompt
         inputs = llm_tokenizer(formatted_prompt, return_tensors="pt")
 
-        # Get the device the model is currently on
-        device = next(llm_model.parameters()).device
+        import comfy.model_management as mm
+
+        # Get the actual execution device and move the LLM there
+        device = mm.get_torch_device()
+        llm_model.to(device)
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         # 3. Generate output text
@@ -217,6 +225,10 @@ class AceStepUnderstandMusic_Custom:
                 do_sample=(temperature > 0),
                 repetition_penalty=1.0,
             )
+
+        # Offload LLM to save VRAM
+        llm_model.to(mm.unet_offload_device())
+        mm.soft_empty_cache()
 
         # 4. Decode the generated tokens
         input_length = inputs["input_ids"].shape[1]
@@ -328,6 +340,7 @@ class AceStepHuggingFaceLoader_Custom:
     CATEGORY = "AceStep/Loaders"
 
     def load_llm(self, model_name, device, dtype):
+        import comfy.model_management as mm
         if LLM_KEY in folder_paths.folder_names_and_paths:
             model_path = folder_paths.get_full_path(LLM_KEY, model_name)
         else:
@@ -370,12 +383,13 @@ class AceStepHuggingFaceLoader_Custom:
             torch_dtype = torch.float32
 
         # Load the model directly using HuggingFace
+        # We load to CPU first, let ComfyUI manage the VRAM execution later in the workflow.
         print(f"Loading HuggingFace LLM from directory: {model_path}")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch_dtype,
-            device_map=device,
+            device_map="cpu", # Force load to CPU to avoid OOM locking
             trust_remote_code=True
         )
         model.eval()
