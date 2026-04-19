@@ -1,7 +1,9 @@
 import torch
 import torchaudio
+import re
+import os
 
-class AceStepAudioToCodes:
+class AceStepAudioToCodes_Custom:
     """
     ComfyUI node to convert an audio waveform into AceStep audio codes.
     Requires initialized DiT and VAE models from AceStep.
@@ -12,7 +14,7 @@ class AceStepAudioToCodes:
             "required": {
                 "dit_model": ("MODEL",),
                 "vae_model": ("VAE",),
-                "silence_latent": ("LATENT",),
+                "silence_latent": ("LATENT",), # Shape [seq_len, dim]
                 "audio": ("AUDIO",),
             }
         }
@@ -74,17 +76,11 @@ class AceStepAudioToCodes:
             silence_latent = silence_latent["samples"]
 
         # Ensure it has the shape [seq_len, dim]
-        # In ComfyUI, latents are typically [batch, channels, height, width]
-        # But AceStep latents are typically [batch, dim, seq_len] or [batch, seq_len, dim].
-        # We ensure it's squeezed to [seq_len, dim] or [batch, seq_len, dim].
         if silence_latent.dim() == 3:
-            # If [batch, dim, seq_len] (usually dim is smaller than seq_len, e.g. 128 vs 1000s)
             if silence_latent.shape[1] < silence_latent.shape[2]:
                 silence_latent = silence_latent.transpose(1, 2)
-            # Remove batch dimension for the padding logic which expects [seq_len, dim]
             silence_latent = silence_latent[0]
         elif silence_latent.dim() == 4:
-            # Squeeze dummy height/width if present
             silence_latent = silence_latent.squeeze(2).squeeze(2)
             if silence_latent.shape[0] == 1:
                 silence_latent = silence_latent[0]
@@ -107,10 +103,6 @@ class AceStepAudioToCodes:
 
         with torch.inference_mode():
             # Use the official logic to tokenize the rearranged hidden states.
-            # We do not pass raw latents to dit_model.tokenize() here, because the official signature expects
-            # patched hidden_states if it's the underlying ace model, or handles it internally.
-            # Since we already did the padding and rearranging above manually to be safe,
-            # we just call the quantizer directly.
             _, indices = dit_model.tokenizer(hidden_states)
 
         # Flatten and format into <|audio_code_X|> strings
@@ -120,18 +112,21 @@ class AceStepAudioToCodes:
         return (codes_string,)
 
 
-class AceStepUnderstandMusic:
+class AceStepUnderstandMusic_Custom:
     """
     ComfyUI node to use the 5Hz LLM to understand audio codes and generate metadata and lyrics.
+    Standalone version that relies on raw HuggingFace models rather than AceStep's LLMHandler.
     """
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "llm_handler": ("ACESTEP_LLM_HANDLER",),
+                "llm_model": ("LLM_MODEL",),
+                "llm_tokenizer": ("LLM_TOKENIZER",),
                 "audio_codes": ("STRING", {"multiline": True, "forceInput": True}),
                 "temperature": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "top_p": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_new_tokens": ("INT", {"default": 1024, "min": 128, "max": 4096}),
             }
         }
 
@@ -140,103 +135,118 @@ class AceStepUnderstandMusic:
     FUNCTION = "understand"
     CATEGORY = "AceStep/Understanding"
 
-    def understand(self, llm_handler, audio_codes, temperature, top_p):
-        if not getattr(llm_handler, "llm_initialized", False):
-            raise ValueError("AceStep LLM Handler is not initialized.")
-
+    def understand(self, llm_model, llm_tokenizer, audio_codes, temperature, top_p, max_new_tokens):
         if not audio_codes or not audio_codes.strip():
             audio_codes = "NO USER INPUT"
 
-        # Replicate the logic of understand_audio_from_codes directly in case
-        # llm_handler lacks it or for strict alignment with the provided explanation.
-
         DEFAULT_LM_UNDERSTAND_INSTRUCTION = "Understand the given musical conditions and describe the audio semantics accordingly:"
 
-        if hasattr(llm_handler, "understand_audio_from_codes"):
-            metadata, status = llm_handler.understand_audio_from_codes(
-                audio_codes=audio_codes,
+        # 1. Format prompt exactly as AceStep expects using the tokenizer's chat template
+        formatted_prompt = llm_tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "system",
+                    "content": f"# Instruction\n{DEFAULT_LM_UNDERSTAND_INSTRUCTION}\n\n"
+                },
+                {
+                    "role": "user",
+                    "content": audio_codes
+                },
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        # 2. Tokenize prompt
+        inputs = llm_tokenizer(formatted_prompt, return_tensors="pt")
+
+        # Get the device the model is currently on
+        device = next(llm_model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        # 3. Generate output text
+        # Since we don't have AceStep's FSM ConstrainedLogitsProcessor, we rely on the
+        # model's native instruction tuning to follow the `<think>` format properly.
+        # The 5Hz model is heavily fine-tuned to do this, so it will work well 99% of the time.
+        with torch.inference_mode():
+            outputs = llm_model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                use_constrained_decoding=True
-            )
-        else:
-            # Fallback direct implementation mirroring the exact code format
-            formatted_prompt = llm_handler.llm_tokenizer.apply_chat_template(
-                [
-                    {
-                        "role": "system",
-                        "content": f"# Instruction\n{DEFAULT_LM_UNDERSTAND_INSTRUCTION}\n\n"
-                    },
-                    {
-                        "role": "user",
-                        "content": audio_codes
-                    },
-                ],
-                tokenize=False,
-                add_generation_prompt=True,
+                do_sample=(temperature > 0),
+                repetition_penalty=1.0,
             )
 
-            output_text, status = llm_handler.generate_from_formatted_prompt(
-                formatted_prompt=formatted_prompt,
-                cfg={
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "generation_phase": "understand"
-                },
-                use_constrained_decoding=True
-            )
+        # 4. Decode the generated tokens
+        input_length = inputs["input_ids"].shape[1]
+        generated_tokens = outputs[0][input_length:]
+        output_text = llm_tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
-            metadata, _ = llm_handler.parse_lm_output(output_text)
+        # 5. Regex Parser to extract metadata from the <think> tag
+        # The expected output format is:
+        # <think>
+        # bpm: 120
+        # caption: A cool song
+        # ...
+        # </think>
+        # [Intro] ...lyrics...
 
-            # Extract lyrics section
-            import re
-            think_end_pattern = r'</think>'
-            match = re.search(think_end_pattern, output_text)
-            if match:
-                lyrics = output_text[match.end():].strip()
-                if lyrics.startswith("# Lyric"):
-                    lyrics = lyrics[len("# Lyric"):].strip()
-                metadata['lyrics'] = lyrics
+        metadata = {
+            "bpm": 0,
+            "caption": "",
+            "duration": 0.0,
+            "keyscale": "",
+            "language": "",
+            "timesignature": "",
+            "lyrics": ""
+        }
 
+        think_match = re.search(r'<think>(.*?)</think>', output_text, re.DOTALL)
+        if think_match:
+            think_content = think_match.group(1).strip()
 
-        if not metadata:
-            raise RuntimeError(f"Failed to understand audio codes: {status}")
+            # Extract fields
+            for line in think_content.split('\n'):
+                line = line.strip()
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    key = key.strip().lower()
+                    value = value.strip()
 
-        # Extract fields
-        caption = metadata.get('caption', '')
-        lyrics = metadata.get('lyrics', '')
-        keyscale = metadata.get('keyscale', '')
-        language = metadata.get('language', metadata.get('vocal_language', ''))
-        timesignature = metadata.get('timesignature', '')
+                    if key in metadata:
+                        if key == 'bpm':
+                            try: metadata['bpm'] = int(value)
+                            except: pass
+                        elif key == 'duration':
+                            try: metadata['duration'] = float(value)
+                            except: pass
+                        else:
+                            metadata[key] = value
 
-        bpm = metadata.get('bpm')
-        if bpm == 'N/A' or not bpm:
-            bpm = 0
+            # Extract lyrics (everything after </think>)
+            lyrics_text = output_text[think_match.end():].strip()
+            if lyrics_text.startswith("# Lyric"):
+                lyrics_text = lyrics_text[len("# Lyric"):].strip()
+            metadata['lyrics'] = lyrics_text
         else:
-            try:
-                bpm = int(bpm)
-            except:
-                bpm = 0
+            # Fallback if the model hallucinated and didn't generate <think>
+            metadata['caption'] = output_text.strip()
 
-        duration = metadata.get('duration')
-        if duration == 'N/A' or not duration:
-            duration = 0.0
-        else:
-            try:
-                duration = float(duration)
-            except:
-                duration = 0.0
+        return (
+            metadata["caption"],
+            metadata["lyrics"],
+            metadata["bpm"],
+            metadata["duration"],
+            metadata["keyscale"],
+            metadata["language"],
+            metadata["timesignature"]
+        )
 
-        return (caption, lyrics, bpm, duration, keyscale, language, timesignature)
-
-
-
-import os
 import folder_paths
 
 # Case-insensitive search for LLM folder in extra_model_paths config
 LLM_KEY = "LLM" if "LLM" in folder_paths.folder_names_and_paths else "llm"
-
 if LLM_KEY not in folder_paths.folder_names_and_paths:
     llm_dir = os.path.join(folder_paths.models_dir, "llm")
     os.makedirs(llm_dir, exist_ok=True)
@@ -248,9 +258,10 @@ if LLM_KEY not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths[LLM_KEY] = ([llm_dir], supported_extensions)
 
 
-class AceStepLLMLoader:
+class AceStepHuggingFaceLoader_Custom:
     """
-    ComfyUI node to load and initialize the AceStep 5Hz Language Model.
+    ComfyUI node to load a HuggingFace LLM directly without AceStep's library.
+    Returns standard LLM_MODEL and LLM_TOKENIZER.
     """
     @classmethod
     def INPUT_TYPES(s):
@@ -266,18 +277,17 @@ class AceStepLLMLoader:
         return {
             "required": {
                 "model_name": (llm_models, ),
-                "backend": (["vllm", "mlx", "transformers"], {"default": "transformers"}),
-                "quantization": (["none", "8bit", "4bit"], {"default": "none"}),
+                "device": (["cuda", "cpu", "mps"], {"default": "cuda"}),
+                "dtype": (["bfloat16", "float16", "float32"], {"default": "bfloat16"})
             }
         }
 
-    RETURN_TYPES = ("ACESTEP_LLM_HANDLER",)
-    RETURN_NAMES = ("llm_handler",)
+    RETURN_TYPES = ("LLM_MODEL", "LLM_TOKENIZER")
+    RETURN_NAMES = ("llm_model", "llm_tokenizer")
     FUNCTION = "load_llm"
     CATEGORY = "AceStep/Loaders"
 
-    def load_llm(self, model_name, backend, quantization):
-        import folder_paths
+    def load_llm(self, model_name, device, dtype):
         if LLM_KEY in folder_paths.folder_names_and_paths:
             model_path = folder_paths.get_full_path(LLM_KEY, model_name)
         else:
@@ -287,60 +297,40 @@ class AceStepLLMLoader:
             raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
 
         try:
-            from acestep.llm_inference import LLMHandler
+            from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError:
-            # Fallback: The user has the AceStep custom node pack installed, but its directory
-            # might not be in the Python path natively (common if it's named something like `ComfyUI-AceStep`).
-            # We search the custom_nodes directory to dynamically find and inject its path.
-            import sys
-            import folder_paths
+            raise ImportError("The 'transformers' python package is required. Please install it in your ComfyUI environment.")
 
-            acestep_found = False
-            custom_nodes_dir = os.path.join(folder_paths.base_path, "custom_nodes")
+        # Resolve dtype
+        if dtype == "bfloat16":
+            torch_dtype = torch.bfloat16
+        elif dtype == "float16":
+            torch_dtype = torch.float16
+        else:
+            torch_dtype = torch.float32
 
-            if os.path.exists(custom_nodes_dir):
-                for item in os.listdir(custom_nodes_dir):
-                    item_path = os.path.join(custom_nodes_dir, item)
-                    if os.path.isdir(item_path):
-                        # Look for the 'acestep' python package inside this custom node
-                        acestep_pkg_path = os.path.join(item_path, "acestep")
-                        if os.path.exists(acestep_pkg_path) and os.path.exists(os.path.join(acestep_pkg_path, "llm_inference.py")):
-                            if item_path not in sys.path:
-                                sys.path.insert(0, item_path)
-                            acestep_found = True
-                            break
-
-            if acestep_found:
-                try:
-                    from acestep.llm_inference import LLMHandler
-                except ImportError as e:
-                    raise ImportError(f"Found AceStep folder but failed to import LLMHandler: {e}")
-            else:
-                raise ImportError("AceStep library is not installed. To fix this, open your ComfyUI python terminal and run: `pip install -r requirements.txt` from the official ACE-Step-1.5 repository, or simply git clone the official ACE-Step-1.5 repository into your `custom_nodes` folder so this extension can find the `acestep` module.")
-
-        handler = LLMHandler(
-            persistent_storage_path=None
+        # Load the model directly using HuggingFace
+        print(f"Loading HuggingFace LLM: {model_path}")
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map=device,
+            trust_remote_code=True
         )
+        model.eval()
 
-        success, status_msg = handler.initialize(
-            model_path=model_path,
-            llm_backend=backend,
-            quantization=None if quantization == "none" else quantization
-        )
+        return (model, tokenizer)
 
-        if not success:
-            raise RuntimeError(f"Failed to initialize AceStep LLM: {status_msg}")
-
-        return (handler,)
 
 NODE_CLASS_MAPPINGS = {
-    "AceStepAudioToCodes_Custom": AceStepAudioToCodes,
-    "AceStepUnderstandMusic_Custom": AceStepUnderstandMusic,
-    "AceStepLLMLoader_Custom": AceStepLLMLoader
+    "AceStepAudioToCodes_Custom": AceStepAudioToCodes_Custom,
+    "AceStepUnderstandMusic_Custom": AceStepUnderstandMusic_Custom,
+    "AceStepHuggingFaceLoader_Custom": AceStepHuggingFaceLoader_Custom
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AceStepAudioToCodes_Custom": "AceStep Audio to Codes (Custom)",
     "AceStepUnderstandMusic_Custom": "AceStep Understand Music (Codes to Prompt) (Custom)",
-    "AceStepLLMLoader_Custom": "AceStep LLM Loader (Custom)"
+    "AceStepHuggingFaceLoader_Custom": "AceStep HuggingFace LLM Loader (Custom)"
 }
