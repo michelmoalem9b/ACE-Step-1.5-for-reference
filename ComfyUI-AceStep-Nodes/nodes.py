@@ -10,8 +10,8 @@ class AceStepAudioToCodes:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "dit_model": ("ACESTEP_DIT_MODEL",),
-                "vae_model": ("ACESTEP_VAE_MODEL",),
+                "dit_model": ("MODEL",),
+                "vae_model": ("VAE",),
                 "silence_latent": ("TENSOR",), # Shape [seq_len, dim]
                 "audio": ("AUDIO",),
             }
@@ -23,6 +23,13 @@ class AceStepAudioToCodes:
     CATEGORY = "AceStep/Understanding"
 
     def convert(self, dit_model, vae_model, silence_latent, audio):
+        # Unwrap ComfyUI standard wrappers
+        if hasattr(vae_model, 'first_stage_model'):
+            vae_model = vae_model.first_stage_model
+
+        if hasattr(dit_model, 'model'):
+            dit_model = dit_model.model
+
         # 1. Extract waveform and sample rate from ComfyUI AUDIO tuple
         waveform = audio["waveform"]
         sample_rate = audio["sample_rate"]
@@ -260,59 +267,14 @@ class AceStepLLMLoader:
 
         return (handler,)
 
-class AceStepModelLoader:
-    """
-    ComfyUI node to load and initialize the AceStep DiT and VAE Models.
-    """
-    @classmethod
-    def INPUT_TYPES(s):
-        checkpoints = folder_paths.get_filename_list("checkpoints")
-        return {
-            "required": {
-                "model_name": (checkpoints, ),
-                "use_compile": ("BOOLEAN", {"default": False}),
-            }
-        }
-
-    RETURN_TYPES = ("ACESTEP_DIT_MODEL", "ACESTEP_VAE_MODEL", "TENSOR")
-    RETURN_NAMES = ("dit_model", "vae_model", "silence_latent")
-    FUNCTION = "load_models"
-    CATEGORY = "AceStep/Loaders"
-
-    def load_models(self, model_name, use_compile):
-        model_path = folder_paths.get_full_path("checkpoints", model_name)
-        if not model_path or not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
-
-        try:
-            from acestep.handler import AceStepHandler
-        except ImportError:
-            raise ImportError("AceStep library is not installed or accessible in ComfyUI's python environment.")
-
-        # AceStepHandler initializes both DiT and VAE internally and handles compilation
-        handler = AceStepHandler()
-
-        success, status_msg = handler.initialize(
-            model_path=model_path,
-            use_compile=use_compile
-        )
-
-        if not success:
-            raise RuntimeError(f"Failed to initialize AceStep Models: {status_msg}")
-
-        # The handler holds references to model, vae, and silence_latent
-        return (handler.model, handler.vae, handler.silence_latent)
-
 NODE_CLASS_MAPPINGS = {
     "AceStepAudioToCodes": AceStepAudioToCodes,
     "AceStepUnderstandMusic": AceStepUnderstandMusic,
-    "AceStepLLMLoader": AceStepLLMLoader,
-    "AceStepModelLoader": AceStepModelLoader
+    "AceStepLLMLoader": AceStepLLMLoader
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AceStepAudioToCodes": "AceStep Audio to Codes",
     "AceStepUnderstandMusic": "AceStep Understand Music (Codes to Prompt)",
-    "AceStepLLMLoader": "AceStep LLM Loader",
-    "AceStepModelLoader": "AceStep Model Loader"
+    "AceStepLLMLoader": "AceStep LLM Loader"
 }
