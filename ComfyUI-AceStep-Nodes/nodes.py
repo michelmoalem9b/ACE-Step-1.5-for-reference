@@ -44,7 +44,8 @@ class AceStepAudioToCodes_Custom:
             waveform = waveform.squeeze(0)
 
         # 2. Normalize to stereo 48kHz (AceStep standard)
-        device = next(vae_model.parameters()).device
+        # Use CPU initially for normalization to save VRAM, we'll move it to the execution device later.
+        device = torch.device('cpu')
         dtype = next(vae_model.parameters()).dtype
         waveform = waveform.to(device)
 
