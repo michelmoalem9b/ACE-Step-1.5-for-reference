@@ -84,15 +84,12 @@ class AceStepAudioToCodes:
         hidden_states = rearrange(hidden_states, 'n (t_patch p) d -> n t_patch p d', p=pool_window_size)
 
         with torch.inference_mode():
-            # Use the official logic to tokenize the rearranged hidden states
-            if hasattr(dit_model, "tokenize") and callable(dit_model.tokenize):
-                # We do not pass raw latents here, because the official signature expects
-                # patched hidden_states if it's the underlying ace model, or handles it internally.
-                # However, since we already did the padding and rearranging above manually to be safe,
-                # we just call the quantizer directly.
-                _, indices = dit_model.tokenizer(hidden_states)
-            else:
-                _, indices = dit_model.tokenizer(hidden_states)
+            # Use the official logic to tokenize the rearranged hidden states.
+            # We do not pass raw latents to dit_model.tokenize() here, because the official signature expects
+            # patched hidden_states if it's the underlying ace model, or handles it internally.
+            # Since we already did the padding and rearranging above manually to be safe,
+            # we just call the quantizer directly.
+            _, indices = dit_model.tokenizer(hidden_states)
 
         # Flatten and format into <|audio_code_X|> strings
         indices_flat = indices.flatten().cpu().tolist()
@@ -215,9 +212,18 @@ class AceStepUnderstandMusic:
 import os
 import folder_paths
 
-# If the "llm" folder doesn't exist, register it safely without crashing
-if "llm" not in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["llm"] = ([os.path.join(folder_paths.models_dir, "llm")], folder_paths.supported_pt_extensions)
+# Case-insensitive search for LLM folder in extra_model_paths config
+LLM_KEY = "LLM" if "LLM" in folder_paths.folder_names_and_paths else "llm"
+
+if LLM_KEY not in folder_paths.folder_names_and_paths:
+    llm_dir = os.path.join(folder_paths.models_dir, "llm")
+    os.makedirs(llm_dir, exist_ok=True)
+    supported_extensions = getattr(
+        folder_paths,
+        "supported_pt_extensions",
+        {".safetensors", ".pt", ".bin", ".ckpt"}
+    )
+    folder_paths.folder_names_and_paths[LLM_KEY] = ([llm_dir], supported_extensions)
 
 
 class AceStepLLMLoader:
@@ -226,14 +232,14 @@ class AceStepLLMLoader:
     """
     @classmethod
     def INPUT_TYPES(s):
-        # Fallback to standard directory scanning logic if specific key isn't present
         import folder_paths
         try:
-            llm_models = folder_paths.get_filename_list("llm")
+            llm_models = folder_paths.get_filename_list(LLM_KEY)
         except Exception:
             llm_models = []
+
         if not llm_models:
-            llm_models = ["AceStep-5Hz-LM"]
+            llm_models = ["AceStep-5Hz-LM (Put model in models/llm)"]
 
         return {
             "required": {
@@ -249,8 +255,8 @@ class AceStepLLMLoader:
     CATEGORY = "AceStep/Loaders"
 
     def load_llm(self, model_name, backend, quantization):
-        if "llm" in folder_paths.folder_names_and_paths:
-            model_path = folder_paths.get_full_path("llm", model_name)
+        if LLM_KEY in folder_paths.folder_names_and_paths:
+            model_path = folder_paths.get_full_path(LLM_KEY, model_name)
         else:
             model_path = os.path.join(folder_paths.models_dir, "llm", model_name)
 
