@@ -25,12 +25,15 @@ class AceStepAudioToCodes_Custom:
     CATEGORY = "AceStep/Understanding"
 
     def convert(self, dit_model, vae_model, silence_latent, audio):
+        print("[AceStepAudioToCodes] Starting conversion process...")
         # Unwrap ComfyUI standard wrappers
         if hasattr(vae_model, 'first_stage_model'):
             vae_model = vae_model.first_stage_model
 
         if hasattr(dit_model, 'model'):
             dit_model = dit_model.model
+
+        print(f"[AceStepAudioToCodes] Models unwrapped. VAE: {type(vae_model).__name__}, DiT: {type(dit_model).__name__}")
 
         # 1. Extract waveform and sample rate from ComfyUI AUDIO tuple
         waveform = audio["waveform"]
@@ -55,8 +58,10 @@ class AceStepAudioToCodes_Custom:
             waveform = waveform[:2, :]
 
         waveform = waveform.to(dtype)
+        print(f"[AceStepAudioToCodes] Audio normalized. Shape: {waveform.shape}, Device: {device}, Dtype: {dtype}")
 
         # 3. VAE Encoding
+        print("[AceStepAudioToCodes] Starting VAE Encoding...")
         with torch.inference_mode():
             # Add batch dimension for VAE
             audio_batch = waveform.unsqueeze(0)
@@ -69,6 +74,7 @@ class AceStepAudioToCodes_Custom:
 
             # CRITICAL: Transpose latents to [Batch, Seq_Len, Dim]
             latents = latents.transpose(1, 2)
+            print(f"[AceStepAudioToCodes] VAE Encoding complete. Latents shape: {latents.shape}")
 
         # 4. DiT Tokenization (Audio to Codes)
         # Unwrap ComfyUI LATENT dictionary
@@ -88,6 +94,7 @@ class AceStepAudioToCodes_Custom:
                 silence_latent = silence_latent.transpose(0, 1)
 
         silence_latent = silence_latent.to(device).to(dtype)
+        print(f"[AceStepAudioToCodes] Silence latent unwrapped. Shape: {silence_latent.shape}")
 
         hidden_states = latents
         attention_mask = torch.ones(hidden_states.shape[0], hidden_states.shape[1], dtype=torch.bool, device=device)
@@ -120,11 +127,14 @@ class AceStepAudioToCodes_Custom:
             hidden_states = torch.cat([hidden_states, pad_tensor], dim=1)
             attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_len), mode='constant', value=False)
 
+        print(f"[AceStepAudioToCodes] Padding complete. Hidden states shape before rearrange: {hidden_states.shape}")
         from einops import rearrange
         # Rearrange into patches: [batch, seq_len, dim] -> [batch, num_patches, patch_size, dim]
         hidden_states = rearrange(hidden_states, 'n (t_patch p) d -> n t_patch p d', p=pool_window_size)
+        print(f"[AceStepAudioToCodes] Rearrange complete. Hidden states shape after rearrange: {hidden_states.shape}")
 
         with torch.inference_mode():
+            print("[AceStepAudioToCodes] Calling DiT tokenizer...")
             # Now that it's patched, we can safely call the underlying tokenizer's quantize method.
             # Using dit_model.tokenizer handles the quantization on the patched hidden_states.
 
