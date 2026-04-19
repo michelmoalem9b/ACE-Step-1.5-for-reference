@@ -296,6 +296,26 @@ class AceStepHuggingFaceLoader_Custom:
         if not model_path or not os.path.exists(model_path):
             raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
 
+        # HuggingFace transformers requires a DIRECTORY containing config.json, tokenizer_config.json, etc.
+        # If the user selected a specific file (e.g. model-00001-of-00002.safetensors), we must point
+        # transformers to its parent directory instead.
+        if os.path.isfile(model_path):
+            hf_dir = os.path.dirname(model_path)
+            # Make sure it's a valid HF directory
+            if not os.path.exists(os.path.join(hf_dir, "config.json")):
+                raise ValueError(
+                    f"Selected file '{model_name}' is inside '{hf_dir}', but no 'config.json' was found there.\n"
+                    "The AceStepHuggingFaceLoader requires the full HuggingFace model folder structure.\n"
+                    "Please download the entire 'AceStep-5Hz-LM' directory from HuggingFace and place the "
+                    "entire folder inside your LLM directory, then select any file inside that folder."
+                )
+            model_path = hf_dir
+        elif not os.path.exists(os.path.join(model_path, "config.json")):
+            raise ValueError(
+                f"Selected directory '{model_path}' does not contain a 'config.json'.\n"
+                "Please ensure you downloaded the complete HuggingFace repository."
+            )
+
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError:
@@ -310,7 +330,7 @@ class AceStepHuggingFaceLoader_Custom:
             torch_dtype = torch.float32
 
         # Load the model directly using HuggingFace
-        print(f"Loading HuggingFace LLM: {model_path}")
+        print(f"Loading HuggingFace LLM from directory: {model_path}")
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
