@@ -284,13 +284,13 @@ class AceStepLLMLoader:
         return (handler,)
 
 NODE_CLASS_MAPPINGS = {
-    "AceStepAudioToCodes": AceStepAudioToCodes,
-    "AceStepUnderstandMusic": AceStepUnderstandMusic,
-    "AceStepLLMLoader": AceStepLLMLoader
+    "AceStepAudioToCodes_Custom": AceStepAudioToCodes,
+    "AceStepUnderstandMusic_Custom": AceStepUnderstandMusic,
+    "AceStepLLMLoader_Custom": AceStepLLMLoader
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AceStepAudioToCodes": "AceStep Audio to Codes",
-    "AceStepUnderstandMusic": "AceStep Understand Music (Codes to Prompt)",
-    "AceStepLLMLoader": "AceStep LLM Loader"
+    "AceStepAudioToCodes_Custom": "AceStep Audio to Codes (Custom)",
+    "AceStepUnderstandMusic_Custom": "AceStep Understand Music (Codes to Prompt) (Custom)",
+    "AceStepLLMLoader_Custom": "AceStep LLM Loader (Custom)"
 }
