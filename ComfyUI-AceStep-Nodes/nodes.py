@@ -12,7 +12,7 @@ class AceStepAudioToCodes:
             "required": {
                 "dit_model": ("MODEL",),
                 "vae_model": ("VAE",),
-                "silence_latent": ("TENSOR",), # Shape [seq_len, dim]
+                "silence_latent": ("LATENT",),
                 "audio": ("AUDIO",),
             }
         }
@@ -69,6 +69,28 @@ class AceStepAudioToCodes:
             latents = latents.transpose(1, 2)
 
         # 4. DiT Tokenization (Audio to Codes)
+        # Unwrap ComfyUI LATENT dictionary
+        if isinstance(silence_latent, dict) and "samples" in silence_latent:
+            silence_latent = silence_latent["samples"]
+
+        # Ensure it has the shape [seq_len, dim]
+        # In ComfyUI, latents are typically [batch, channels, height, width]
+        # But AceStep latents are typically [batch, dim, seq_len] or [batch, seq_len, dim].
+        # We ensure it's squeezed to [seq_len, dim] or [batch, seq_len, dim].
+        if silence_latent.dim() == 3:
+            # If [batch, dim, seq_len] (usually dim is smaller than seq_len, e.g. 128 vs 1000s)
+            if silence_latent.shape[1] < silence_latent.shape[2]:
+                silence_latent = silence_latent.transpose(1, 2)
+            # Remove batch dimension for the padding logic which expects [seq_len, dim]
+            silence_latent = silence_latent[0]
+        elif silence_latent.dim() == 4:
+            # Squeeze dummy height/width if present
+            silence_latent = silence_latent.squeeze(2).squeeze(2)
+            if silence_latent.shape[0] == 1:
+                silence_latent = silence_latent[0]
+            if silence_latent.shape[0] < silence_latent.shape[1]:
+                silence_latent = silence_latent.transpose(0, 1)
+
         silence_latent = silence_latent.to(device).to(dtype)
 
         hidden_states = latents
