@@ -84,15 +84,13 @@ class AceStepAudioToCodes:
         hidden_states = rearrange(hidden_states, 'n (t_patch p) d -> n t_patch p d', p=pool_window_size)
 
         with torch.inference_mode():
-            # The model's forward or quantize methods might need to be called depending on ComfyUI integration,
-            # but we use the tokenizer to match the official logic exactly.
+            # Use the official logic to tokenize the rearranged hidden states
             if hasattr(dit_model, "tokenize") and callable(dit_model.tokenize):
-                # Try passing raw latents if tokenize handles it internally
-                try:
-                    _, indices, _ = dit_model.tokenize(latents, silence_latent, torch.ones(latents.shape[0], latents.shape[1], dtype=torch.bool, device=device).unsqueeze(0))
-                except TypeError:
-                    # Fallback to direct quantization
-                    _, indices = dit_model.tokenizer(hidden_states)
+                # We do not pass raw latents here, because the official signature expects
+                # patched hidden_states if it's the underlying ace model, or handles it internally.
+                # However, since we already did the padding and rearranging above manually to be safe,
+                # we just call the quantizer directly.
+                _, indices = dit_model.tokenizer(hidden_states)
             else:
                 _, indices = dit_model.tokenizer(hidden_states)
 
@@ -223,8 +221,14 @@ class AceStepLLMLoader:
     """
     @classmethod
     def INPUT_TYPES(s):
-        # Allow ComfyUI to scan its standard LLM/checkpoints folder.
-        llm_models = folder_paths.get_filename_list("llm") if "llm" in folder_paths.folder_names_and_paths else ["AceStep-5Hz-LM"]
+        # Fallback to standard directory scanning logic if specific key isn't present
+        try:
+            llm_models = folder_paths.get_filename_list("llm")
+        except:
+            llm_models = []
+        if not llm_models:
+            llm_models = ["AceStep-5Hz-LM"]
+
         return {
             "required": {
                 "model_name": (llm_models, ),
