@@ -206,12 +206,113 @@ class AceStepUnderstandMusic:
         return (caption, lyrics, bpm, duration, keyscale, language, timesignature)
 
 
+
+import os
+import folder_paths
+
+class AceStepLLMLoader:
+    """
+    ComfyUI node to load and initialize the AceStep 5Hz Language Model.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        # Allow ComfyUI to scan its standard LLM/checkpoints folder.
+        llm_models = folder_paths.get_filename_list("llm") if "llm" in folder_paths.folder_names_and_paths else ["AceStep-5Hz-LM"]
+        return {
+            "required": {
+                "model_name": (llm_models, ),
+                "backend": (["vllm", "mlx", "transformers"], {"default": "transformers"}),
+                "quantization": (["none", "8bit", "4bit"], {"default": "none"}),
+            }
+        }
+
+    RETURN_TYPES = ("ACESTEP_LLM_HANDLER",)
+    RETURN_NAMES = ("llm_handler",)
+    FUNCTION = "load_llm"
+    CATEGORY = "AceStep/Loaders"
+
+    def load_llm(self, model_name, backend, quantization):
+        if "llm" in folder_paths.folder_names_and_paths:
+            model_path = folder_paths.get_full_path("llm", model_name)
+        else:
+            model_path = os.path.join(folder_paths.models_dir, "llm", model_name)
+
+        if not model_path or not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
+
+        try:
+            from acestep.llm_inference import LLMHandler
+        except ImportError:
+            raise ImportError("AceStep library is not installed or accessible in ComfyUI's python environment.")
+
+        handler = LLMHandler(
+            persistent_storage_path=None
+        )
+
+        success, status_msg = handler.initialize(
+            model_path=model_path,
+            llm_backend=backend,
+            quantization=None if quantization == "none" else quantization
+        )
+
+        if not success:
+            raise RuntimeError(f"Failed to initialize AceStep LLM: {status_msg}")
+
+        return (handler,)
+
+class AceStepModelLoader:
+    """
+    ComfyUI node to load and initialize the AceStep DiT and VAE Models.
+    """
+    @classmethod
+    def INPUT_TYPES(s):
+        checkpoints = folder_paths.get_filename_list("checkpoints")
+        return {
+            "required": {
+                "model_name": (checkpoints, ),
+                "use_compile": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("ACESTEP_DIT_MODEL", "ACESTEP_VAE_MODEL", "TENSOR")
+    RETURN_NAMES = ("dit_model", "vae_model", "silence_latent")
+    FUNCTION = "load_models"
+    CATEGORY = "AceStep/Loaders"
+
+    def load_models(self, model_name, use_compile):
+        model_path = folder_paths.get_full_path("checkpoints", model_name)
+        if not model_path or not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model {model_name} not found at {model_path}")
+
+        try:
+            from acestep.handler import AceStepHandler
+        except ImportError:
+            raise ImportError("AceStep library is not installed or accessible in ComfyUI's python environment.")
+
+        # AceStepHandler initializes both DiT and VAE internally and handles compilation
+        handler = AceStepHandler()
+
+        success, status_msg = handler.initialize(
+            model_path=model_path,
+            use_compile=use_compile
+        )
+
+        if not success:
+            raise RuntimeError(f"Failed to initialize AceStep Models: {status_msg}")
+
+        # The handler holds references to model, vae, and silence_latent
+        return (handler.model, handler.vae, handler.silence_latent)
+
 NODE_CLASS_MAPPINGS = {
     "AceStepAudioToCodes": AceStepAudioToCodes,
-    "AceStepUnderstandMusic": AceStepUnderstandMusic
+    "AceStepUnderstandMusic": AceStepUnderstandMusic,
+    "AceStepLLMLoader": AceStepLLMLoader,
+    "AceStepModelLoader": AceStepModelLoader
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AceStepAudioToCodes": "AceStep Audio to Codes",
-    "AceStepUnderstandMusic": "AceStep Understand Music (Codes to Prompt)"
+    "AceStepUnderstandMusic": "AceStep Understand Music (Codes to Prompt)",
+    "AceStepLLMLoader": "AceStep LLM Loader",
+    "AceStepModelLoader": "AceStep Model Loader"
 }
