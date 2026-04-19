@@ -215,6 +215,11 @@ class AceStepUnderstandMusic:
 import os
 import folder_paths
 
+# If the "llm" folder doesn't exist, register it safely without crashing
+if "llm" not in folder_paths.folder_names_and_paths:
+    folder_paths.folder_names_and_paths["llm"] = ([os.path.join(folder_paths.models_dir, "llm")], folder_paths.supported_pt_extensions)
+
+
 class AceStepLLMLoader:
     """
     ComfyUI node to load and initialize the AceStep 5Hz Language Model.
@@ -222,9 +227,10 @@ class AceStepLLMLoader:
     @classmethod
     def INPUT_TYPES(s):
         # Fallback to standard directory scanning logic if specific key isn't present
+        import folder_paths
         try:
             llm_models = folder_paths.get_filename_list("llm")
-        except:
+        except Exception:
             llm_models = []
         if not llm_models:
             llm_models = ["AceStep-5Hz-LM"]
