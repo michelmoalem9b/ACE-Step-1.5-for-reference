@@ -92,18 +92,48 @@ class AceStepAudioToCodes_Custom:
         hidden_states = latents
         attention_mask = torch.ones(hidden_states.shape[0], hidden_states.shape[1], dtype=torch.bool, device=device)
 
+        # We defer the padding and rearranging to the dit_model.tokenize method if possible
+        # because doing it manually here was causing edge cases where silence_latent shapes didn't match.
+        pass
+
         pool_window_size = dit_model.config.pool_window_size
         if hidden_states.shape[1] % pool_window_size != 0:
             pad_len = pool_window_size - (hidden_states.shape[1] % pool_window_size)
-            hidden_states = torch.cat([hidden_states, silence_latent[:1, :pad_len].repeat(hidden_states.shape[0], 1, 1)], dim=1)
+
+            # Ensure silence_latent is exactly [pad_len, dim] so repeat/cat works correctly
+            if silence_latent.dim() == 2:
+                # Shape is [seq_len, dim]. We want to slice the seq_len dimension to pad_len.
+                pad_slice = silence_latent[:pad_len, :]
+            else:
+                # Squeeze down to 2D first if possible
+                silence_latent = silence_latent.squeeze()
+                if silence_latent.dim() == 2:
+                    pad_slice = silence_latent[:pad_len, :]
+                else:
+                    # Absolute worst case fallback if shape is bizarre
+                    pad_slice = torch.zeros((pad_len, hidden_states.shape[2]), device=device, dtype=dtype)
+
+            # Repeat to match batch size: [batch, pad_len, dim]
+            pad_tensor = pad_slice.unsqueeze(0).repeat(hidden_states.shape[0], 1, 1)
+
+            # Concatenate along seq_len dimension
+            hidden_states = torch.cat([hidden_states, pad_tensor], dim=1)
             attention_mask = torch.nn.functional.pad(attention_mask, (0, pad_len), mode='constant', value=False)
 
         from einops import rearrange
+        # Rearrange into patches: [batch, seq_len, dim] -> [batch, num_patches, patch_size, dim]
         hidden_states = rearrange(hidden_states, 'n (t_patch p) d -> n t_patch p d', p=pool_window_size)
 
         with torch.inference_mode():
-            # Use the official logic to tokenize the rearranged hidden states.
-            _, indices = dit_model.tokenizer(hidden_states)
+            # Now that it's patched, we can safely call the underlying tokenizer's quantize method.
+            # Using dit_model.tokenizer handles the quantization on the patched hidden_states.
+
+            # The tokenizer might return one or two things depending on version. We unpack robustly.
+            tokens = dit_model.tokenizer(hidden_states)
+            if isinstance(tokens, tuple) and len(tokens) >= 2:
+                indices = tokens[1]
+            else:
+                indices = tokens
 
         # Flatten and format into <|audio_code_X|> strings
         indices_flat = indices.flatten().cpu().tolist()
