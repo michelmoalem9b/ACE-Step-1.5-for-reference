@@ -316,7 +316,7 @@ class AceStepLLMLoader:
                 except ImportError as e:
                     raise ImportError(f"Found AceStep folder but failed to import LLMHandler: {e}")
             else:
-                raise ImportError("AceStep library is not installed or accessible in ComfyUI's python environment. Could not find 'acestep' module in any custom_nodes directory.")
+                raise ImportError("AceStep library is not installed. To fix this, open your ComfyUI python terminal and run: `pip install -r requirements.txt` from the official ACE-Step-1.5 repository, or simply git clone the official ACE-Step-1.5 repository into your `custom_nodes` folder so this extension can find the `acestep` module.")
 
         handler = LLMHandler(
             persistent_storage_path=None
